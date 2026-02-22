@@ -3,24 +3,23 @@ import time
 import shutil
 import json
 import gspread
-import google.generativeai as genai
+from google import genai
+from google.genai import types
 from dotenv import load_dotenv
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 
-# 1. Load environment variables (Your Gemini API Key)
+# 1. Load environment variables
 load_dotenv()
 
-# 2. Configure Gemini API
-genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
-# Using Gemini 1.5 Pro as it is the best model for handling PDFs natively
-model = genai.GenerativeModel('gemini-1.5-pro')
+# 2. Configure the NEW Google GenAI Client
+# The new SDK automatically finds your GEMINI_API_KEY in the .env file!
+client = genai.Client() 
 
 # 3. Configure Google Sheets
-# Make sure your credentials.json is in the folder and shared with your sheet!
 gc = gspread.service_account(filename='credentials.json')
-# UPDATE THIS LINE with the actual name of your Google Sheet:
-sheet = gc.open('YOUR_SHEET_NAME_HERE').sheet1 
+# UPDATE THIS LINE:
+sheet = gc.open('Data').sheet1 
 
 # 4. Define our folder paths
 IN_FOLDER = "receipts_in"
@@ -57,18 +56,20 @@ You must respond strictly in valid JSON format using this exact schema:
 """
 
 def process_receipt(file_path):
-    print(f"\n📄 New receipt detected: {file_path}")
+    print(f"\n📄 New receipt detected: {os.path.basename(file_path)}")
     print("🧠 Sending to Gemini for analysis...")
     
     try:
-        # Upload the PDF to Gemini
-        receipt_file = genai.upload_file(path=file_path)
+        # Upload the PDF using the NEW SDK
+        receipt_file = client.files.upload(file=file_path)
         
-        # Ask Gemini to generate the JSON response
-        response = model.generate_content(
-            [receipt_file, PROMPT],
-            # This forces Gemini to ONLY output clean JSON so our script doesn't break
-            generation_config={"response_mime_type": "application/json"}
+        # Ask Gemini to generate the JSON response using the NEW SDK
+        response = client.models.generate_content(
+            model='gemini-2.5-flash-lite', # Using the high-volume free tier model
+            contents=[receipt_file, PROMPT],
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json"
+            )
         )
         
         # Parse the JSON response into Python dictionaries
@@ -78,8 +79,6 @@ def process_receipt(file_path):
         
         rows_to_add = []
         for item in items:
-            # Match this order to the columns in your Google Sheet!
-            # Example: [Date, Store, Product Name, Category, Calories, Quantity, Price, Total Cost]
             row = [
                 meta.get("date", ""),
                 meta.get("store", ""),
@@ -97,25 +96,40 @@ def process_receipt(file_path):
             sheet.append_rows(rows_to_add)
             print("✅ Success!")
         
-        # Move the PDF to the processed folder so it doesn't run twice
+        # Move the PDF to the processed folder
         shutil.move(file_path, os.path.join(PROCESSED_FOLDER, os.path.basename(file_path)))
         
     except Exception as e:
         print(f"❌ Error processing {file_path}: {e}")
-        # Move to error folder so we don't lose the file, but don't crash the program
         shutil.move(file_path, os.path.join(ERROR_FOLDER, os.path.basename(file_path)))
 
 # 6. The "Watchdog" that monitors the folder 24/7
 class ReceiptHandler(FileSystemEventHandler):
     def on_created(self, event):
-        # Only trigger if it's a PDF file
         if not event.is_directory and event.src_path.lower().endswith('.pdf'):
-            # Wait 2 seconds to make sure the file is completely saved to the folder
             time.sleep(2)
             process_receipt(event.src_path)
 
 if __name__ == "__main__":
-    print(f"👀 Watching the '{IN_FOLDER}' folder for new Hemköp PDFs...")
+    print(f"Waiting for new PDF in '{IN_FOLDER}'")
+    
+    # --- NEW FEATURE: Startup Folder Check ---
+    # Look for any PDFs that are already in the folder
+    existing_pdfs = [f for f in os.listdir(IN_FOLDER) if f.lower().endswith('.pdf')]
+    
+    if not existing_pdfs:
+        print(f"📭 The '{IN_FOLDER}' folder is currently empty. Waiting for you to drop a PDF here!")
+    else:
+        print(f"📂 Found {len(existing_pdfs)} existing PDF(s) on startup. Processing them now...")
+        for pdf in existing_pdfs:
+            process_receipt(os.path.join(IN_FOLDER, pdf))
+            
+        # --- NEW COMPLETION MESSAGES ---
+        print("\n✅ All caught up! Finished processing the startup queue.")
+        print(f"👀 Now watching the '{IN_FOLDER}' folder for new PDFs...")
+        # -------------------------------
+    # -----------------------------------------
+
     print("Press Ctrl+C to stop the script.\n")
     
     event_handler = ReceiptHandler()
