@@ -1,0 +1,7 @@
+credentials.json
+venv/
+.env
+__pycache__/
+receipts_in/
+receipts_processed/
+receipts_error/
